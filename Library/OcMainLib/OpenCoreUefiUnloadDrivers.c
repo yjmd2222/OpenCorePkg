@@ -1,5 +1,5 @@
 /** @file
-  Unload images by name. Includes image name code from ShellPkg UefiHandleParsingLib.c.
+  Unload images by name or firmware file GUID. Includes image name code from ShellPkg UefiHandleParsingLib.c.
 
   Copyright (c) 2010 - 2017, Intel Corporation. All rights reserved.<BR>
   (C) Copyright 2013-2015 Hewlett-Packard Development Company, L.P.<BR>
@@ -12,6 +12,7 @@
 
 #include <Library/UefiLib.h>
 #include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DevicePathLib.h>
 #include <Library/MemoryAllocationLib.h>
@@ -38,6 +39,8 @@ VOID
 
 typedef struct {
   CHAR16     *UnloadName;
+  EFI_GUID   FileGuid;
+  BOOLEAN    MatchGuid;
   BOOLEAN    Unloaded;
 } UNLOAD_INFO;
 
@@ -185,7 +188,10 @@ UnloadImageByName (
   UnloadContext = Context;
 
   for (Index = 0; Index < UnloadContext->UnloadNameCount; Index++) {
-    if (StrCmp (UnloadContext->UnloadInfo[Index].UnloadName, Name) == 0) {
+    if (  !UnloadContext->UnloadInfo[Index].MatchGuid
+       && !UnloadContext->UnloadInfo[Index].Unloaded
+       && (StrCmp (UnloadContext->UnloadInfo[Index].UnloadName, Name) == 0))
+    {
       Status = gBS->UnloadImage (Handle);
       DEBUG ((
         EFI_ERROR (Status) ? DEBUG_WARN : DEBUG_INFO,
@@ -197,6 +203,126 @@ UnloadImageByName (
       break;
     }
   }
+}
+
+/**
+  Match a firmware file node in a loaded image's device path.
+**/
+STATIC
+BOOLEAN
+ImageHasFileGuid (
+  IN EFI_LOADED_IMAGE_PROTOCOL  *LoadedImage,
+  IN CONST EFI_GUID             *FileGuid
+  )
+{
+  EFI_DEVICE_PATH_PROTOCOL  *Node;
+  EFI_GUID                  NodeGuid;
+
+  Node = LoadedImage->FilePath;
+  if ((Node == NULL) || !IsDevicePathValid (Node, 0)) {
+    return FALSE;
+  }
+
+  while (!IsDevicePathEnd (Node)) {
+    if (  (DevicePathType (Node) == MEDIA_DEVICE_PATH)
+       && (DevicePathSubType (Node) == MEDIA_PIWG_FW_FILE_DP)
+       && (DevicePathNodeLength (Node) == sizeof (MEDIA_FW_VOL_FILEPATH_DEVICE_PATH)))
+    {
+      CopyMem (&NodeGuid, &((MEDIA_FW_VOL_FILEPATH_DEVICE_PATH *)Node)->FvFileName, sizeof (NodeGuid));
+      if (CompareGuid (&NodeGuid, FileGuid)) {
+        return TRUE;
+      }
+    }
+
+    Node = NextDevicePathNode (Node);
+  }
+
+  return FALSE;
+}
+
+/**
+  GUID targets need not implement DriverBinding or ComponentName protocols.
+  Enumerate loaded images once so mixed GUID/name targets retain reverse order.
+**/
+STATIC
+VOID
+ProcessUnloadImages (
+  IN UNLOAD_IMAGE_CONTEXT  *Context
+  )
+{
+  EFI_STATUS                   Status;
+  EFI_HANDLE                   *Handles;
+  UINTN                        HandleCount;
+  UINTN                        HandleIndex;
+  UINTN                        Index;
+  EFI_LOADED_IMAGE_PROTOCOL    *LoadedImage;
+  EFI_DRIVER_BINDING_PROTOCOL  *DriverBinding;
+  CONST CHAR16                 *Name;
+  BOOLEAN                      Attempted;
+
+  Status = gBS->LocateHandleBuffer (
+                  ByProtocol,
+                  &gEfiLoadedImageProtocolGuid,
+                  NULL,
+                  &HandleCount,
+                  &Handles
+                  );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN, "OC: Failed to locate unload images - %r\n", Status));
+    return;
+  }
+
+  for (HandleIndex = HandleCount; HandleIndex > 0; --HandleIndex) {
+    Status = gBS->HandleProtocol (
+                    Handles[HandleIndex - 1],
+                    &gEfiLoadedImageProtocolGuid,
+                    (VOID **)&LoadedImage
+                    );
+    if (EFI_ERROR (Status)) {
+      continue;
+    }
+
+    Attempted = FALSE;
+    for (Index = 0; Index < Context->UnloadNameCount; ++Index) {
+      if (  Context->UnloadInfo[Index].MatchGuid
+         && !Context->UnloadInfo[Index].Unloaded
+         && ImageHasFileGuid (LoadedImage, &Context->UnloadInfo[Index].FileGuid))
+      {
+        DEBUG ((DEBUG_INFO, "OC: GUID unload target %g handle %p callback %p\n", &Context->UnloadInfo[Index].FileGuid, Handles[HandleIndex - 1], LoadedImage->Unload));
+        Status = gBS->UnloadImage (Handles[HandleIndex - 1]);
+        DEBUG ((
+          EFI_ERROR (Status) ? DEBUG_WARN : DEBUG_INFO,
+          "OC: UnloadImage GUID %g - %r\n",
+          &Context->UnloadInfo[Index].FileGuid,
+          Status
+          ));
+        Context->UnloadInfo[Index].Unloaded = TRUE;
+        Attempted                          = TRUE;
+        break;
+      }
+    }
+
+    //
+    // The image may have been freed by UnloadImage. Do not probe it again.
+    //
+    if (Attempted) {
+      continue;
+    }
+
+    Status = gBS->HandleProtocol (
+                    Handles[HandleIndex - 1],
+                    &gEfiDriverBindingProtocolGuid,
+                    (VOID **)&DriverBinding
+                    );
+    if (!EFI_ERROR (Status)) {
+      Name = GetStringNameFromHandle (Handles[HandleIndex - 1], NULL);
+      if (Name != NULL) {
+        UnloadImageByName (Context, Name, Handles[HandleIndex - 1]);
+      }
+    }
+  }
+
+  FreePool (Handles);
 }
 
 //
@@ -268,6 +394,7 @@ OcUnloadDrivers (
   UINTN                 Index2;
   UINTN                 UnloadInfoSize;
   UNLOAD_IMAGE_CONTEXT  UnloadContext;
+  BOOLEAN               HasGuid;
 
   if (Config->Uefi.Unload.Count == 0) {
     return;
@@ -289,6 +416,7 @@ OcUnloadDrivers (
     return;
   }
 
+  HasGuid = FALSE;
   for (Index = 0; Index < Config->Uefi.Unload.Count; ++Index) {
     UnloadContext.UnloadInfo[Index].UnloadName = AsciiStrCopyToUnicode (
                                                    OC_BLOB_GET (
@@ -305,11 +433,25 @@ OcUnloadDrivers (
       DEBUG ((DEBUG_ERROR, "OC: Failed to allocate unload names!\n"));
       return;
     }
+
+    if (StrLen (UnloadContext.UnloadInfo[Index].UnloadName) == 36) {
+      UnloadContext.UnloadInfo[Index].MatchGuid = !EFI_ERROR (
+                                                   StrToGuid (
+                                                     UnloadContext.UnloadInfo[Index].UnloadName,
+                                                     &UnloadContext.UnloadInfo[Index].FileGuid
+                                                     )
+                                                   );
+      HasGuid |= UnloadContext.UnloadInfo[Index].MatchGuid;
+    }
   }
 
   UnloadContext.UnloadNameCount = Config->Uefi.Unload.Count;
 
-  ProcessAllDrivers (&UnloadContext, UnloadImageByName, FALSE);
+  if (HasGuid) {
+    ProcessUnloadImages (&UnloadContext);
+  } else {
+    ProcessAllDrivers (&UnloadContext, UnloadImageByName, FALSE);
+  }
 
   for (Index = 0; Index < Config->Uefi.Unload.Count; ++Index) {
     if (!UnloadContext.UnloadInfo[Index].Unloaded) {

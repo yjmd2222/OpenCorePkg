@@ -608,7 +608,7 @@ OC_DECLARE (OC_PLATFORM_CONFIG)
 **/
 
 ///
-/// Array of driver names to unload.
+/// Array of driver component names or firmware file GUIDs to unload.
 ///
 #define OC_UEFI_UNLOAD_ARRAY_FIELDS(_, __) \
   OC_ARRAY (OC_STRING, _, __)

@@ -7803,8 +7803,14 @@ OpenCore is installed, in order for the \texttt{Launchd.command} script to work 
   \textbf{Description}: Unload specified firmware drivers.
 
   To be filled with \texttt{plist\ string} entries containing
-  the names of firmware drivers to unload before loading the
+  the names or firmware file GUIDs of drivers to unload before loading the
   \texttt{Drivers} section.
+  File GUID entries use the canonical \texttt{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+  format (case-insensitive, without braces). For GUID entries, OpenCore matches
+  firmware file nodes in the \texttt{LoadedImageProtocol} device path, without
+  requiring driver binding or component name protocols. The firmware still
+  determines whether the matched image can be unloaded; failures are logged.
+  Unloading does not undo hardware initialization or unregister separate SMM handlers.
   This setting is typically only required if a user-provided driver is a variant of
   an existing system firmware driver, and if the new driver would detect itself
   as partially loaded, or otherwise fail to operate correctly, if the old
@@ -7825,6 +7831,7 @@ OpenCore is installed, in order for the \texttt{Launchd.command} script to work 
   The relevant name is the driver component name. Drivers are only listed if they
   implement \texttt{DriverBindingProtocol} and \texttt{LoadedImageProtocol},
   and have an available component name.
+  This component-name list does not include all images which can be selected by GUID.
 
   \emph{Note 3}: The NVRAM \texttt{Lang} and \texttt{PlatformLang} variables
   are ignored when determining the driver component names recognised by this
