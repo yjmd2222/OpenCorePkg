@@ -793,6 +793,7 @@ OcSetDefaultBootEntry (
   UINT16           EntryIdLength;
   UINTN            BootOrderCount;
   UINTN            BootChosenIndex;
+  UINTN            MatchedIndex;
   UINTN            Index;
   UINTN            DevicePathSize;
   UINTN            UnmanagedBootDevPathSize;
@@ -858,6 +859,7 @@ OcSetDefaultBootEntry (
                 );
 
   MatchedEntry    = FALSE;
+  MatchedIndex    = BootOrderCount;
   BootChosenIndex = BootOrderCount;
   for (Index = 0; Index < BootOrderCount; ++Index) {
     if (BootOrder[Index] == 0x80) {
@@ -928,6 +930,10 @@ OcSetDefaultBootEntry (
           }
         }
       }
+    }
+
+    if (MatchedEntry) {
+      MatchedIndex = Index;
     }
 
     FreePool (LoadOption);
@@ -1103,7 +1109,7 @@ OcSetDefaultBootEntry (
     }
   } else {
     DEBUG ((DEBUG_INFO, "OCB: Matched default entry in BootOrder\n"));
-    BootChosenIndex = Index;
+    BootChosenIndex = MatchedIndex;
   }
 
   //
